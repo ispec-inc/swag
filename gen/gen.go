@@ -71,6 +71,7 @@ import (
 
 var doc = {{.Doc}}
 
+
 type s struct{}
 
 func (s *s) ReadDoc() string {

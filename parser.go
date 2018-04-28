@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -61,10 +60,17 @@ func New() *Parser {
 func (parser *Parser) ParseAPI(searchDir string, mainAPIFile string) {
 	log.Println("Generate general API Info")
 	parser.getAllGoFileInfo(searchDir)
-	parser.ParseGeneralAPIInfo(path.Join(searchDir, mainAPIFile))
+	// parser.ParseGeneralAPIInfo(path.Join(searchDir, mainAPIFile))
 
 	for _, astFile := range parser.files {
 		parser.ParseType(astFile)
+	}
+
+	// get mainAPIFile
+	for k := range parser.files {
+		if filepath.Base(k) == mainAPIFile {
+			parser.ParseGeneralAPIInfoByAstFile(parser.files[k])
+		}
 	}
 
 	for _, astFile := range parser.files {
@@ -72,6 +78,166 @@ func (parser *Parser) ParseAPI(searchDir string, mainAPIFile string) {
 	}
 
 	parser.ParseDefinitions()
+}
+
+func (parser *Parser) ParseGeneralAPIInfoByAstFile(astFile *ast.File) {
+	parser.swagger.Swagger = "2.0"
+	securityMap := map[string]*spec.SecurityScheme{}
+
+	for _, comment := range astFile.Comments {
+		comments := strings.Split(comment.Text(), "\n")
+
+		// ⬇︎この段階でlineごとのstringになっている。
+		for _, commentLine := range comments {
+			attribute := strings.ToLower(strings.Split(commentLine, " ")[0])
+			switch attribute {
+			case "@version":
+				parser.swagger.Info.Version = strings.TrimSpace(commentLine[len(attribute):])
+			case "@title":
+				parser.swagger.Info.Title = strings.TrimSpace(commentLine[len(attribute):])
+			case "@description":
+				parser.swagger.Info.Description = strings.TrimSpace(commentLine[len(attribute):])
+			case "@termsofservice":
+				parser.swagger.Info.TermsOfService = strings.TrimSpace(commentLine[len(attribute):])
+			case "@contact.name":
+				parser.swagger.Info.Contact.Name = strings.TrimSpace(commentLine[len(attribute):])
+			case "@contact.email":
+				parser.swagger.Info.Contact.Email = strings.TrimSpace(commentLine[len(attribute):])
+			case "@contact.url":
+				parser.swagger.Info.Contact.URL = strings.TrimSpace(commentLine[len(attribute):])
+			case "@license.name":
+				parser.swagger.Info.License.Name = strings.TrimSpace(commentLine[len(attribute):])
+			case "@license.url":
+				parser.swagger.Info.License.URL = strings.TrimSpace(commentLine[len(attribute):])
+			case "@host":
+				parser.swagger.Host = strings.TrimSpace(commentLine[len(attribute):])
+			case "@basepath":
+				parser.swagger.BasePath = strings.TrimSpace(commentLine[len(attribute):])
+			case "@schemes":
+				parser.swagger.Schemes = GetSchemes(commentLine)
+			}
+		}
+
+		for i := 0; i < len(comments); i++ {
+			attribute := strings.ToLower(strings.Split(comments[i], " ")[0])
+			switch attribute {
+			case "@securitydefinitions.basic":
+				securityMap[strings.TrimSpace(comments[i][len(attribute):])] = spec.BasicAuth()
+			case "@securitydefinitions.apikey":
+				attrMap := map[string]string{}
+				for _, v := range comments[i+1:] {
+					securityAttr := strings.ToLower(strings.Split(v, " ")[0])
+					if securityAttr == "@in" || securityAttr == "@name" {
+						attrMap[securityAttr] = strings.TrimSpace(v[len(securityAttr):])
+					}
+					// next securityDefinitions
+					if strings.Index(securityAttr, "@securitydefinitions.") == 0 {
+						break
+					}
+				}
+				if len(attrMap) != 2 {
+					log.Panic("@securitydefinitions.apikey is @name and @in required")
+				}
+				securityMap[strings.TrimSpace(comments[i][len(attribute):])] = spec.APIKeyAuth(attrMap["@name"], attrMap["@in"])
+			case "@securitydefinitions.oauth2.application":
+				attrMap := map[string]string{}
+				scopes := map[string]string{}
+				for _, v := range comments[i+1:] {
+					securityAttr := strings.ToLower(strings.Split(v, " ")[0])
+					if securityAttr == "@tokenurl" {
+						attrMap[securityAttr] = strings.TrimSpace(v[len(securityAttr):])
+					} else if isExistsScope(securityAttr) {
+						scopes[getScopeScheme(securityAttr)] = v[len(securityAttr):]
+					}
+					// next securityDefinitions
+					if strings.Index(securityAttr, "@securitydefinitions.") == 0 {
+						break
+					}
+				}
+				if len(attrMap) != 1 {
+					log.Panic("@securitydefinitions.oauth2.application is @tokenUrl required")
+				}
+				securityScheme := spec.OAuth2Application(attrMap["@tokenurl"])
+				for scope, description := range scopes {
+					securityScheme.AddScope(scope, description)
+				}
+				securityMap[strings.TrimSpace(comments[i][len(attribute):])] = securityScheme
+			case "@securitydefinitions.oauth2.implicit":
+				attrMap := map[string]string{}
+				scopes := map[string]string{}
+				for _, v := range comments[i+1:] {
+					securityAttr := strings.ToLower(strings.Split(v, " ")[0])
+					if securityAttr == "@authorizationurl" {
+						attrMap[securityAttr] = strings.TrimSpace(v[len(securityAttr):])
+					} else if isExistsScope(securityAttr) {
+						scopes[getScopeScheme(securityAttr)] = v[len(securityAttr):]
+					}
+					// next securityDefinitions
+					if strings.Index(securityAttr, "@securitydefinitions.") == 0 {
+						break
+					}
+				}
+				if len(attrMap) != 1 {
+					log.Panic("@securitydefinitions.oauth2.implicit is @authorizationUrl required")
+				}
+				securityScheme := spec.OAuth2Implicit(attrMap["@authorizationurl"])
+				for scope, description := range scopes {
+					securityScheme.AddScope(scope, description)
+				}
+				securityMap[strings.TrimSpace(comments[i][len(attribute):])] = securityScheme
+			case "@securitydefinitions.oauth2.password":
+				attrMap := map[string]string{}
+				scopes := map[string]string{}
+				for _, v := range comments[i+1:] {
+					securityAttr := strings.ToLower(strings.Split(v, " ")[0])
+					if securityAttr == "@tokenurl" {
+						attrMap[securityAttr] = strings.TrimSpace(v[len(securityAttr):])
+					} else if isExistsScope(securityAttr) {
+						scopes[getScopeScheme(securityAttr)] = v[len(securityAttr):]
+					}
+					// next securityDefinitions
+					if strings.Index(securityAttr, "@securitydefinitions.") == 0 {
+						break
+					}
+				}
+				if len(attrMap) != 1 {
+					log.Panic("@securitydefinitions.oauth2.password is @tokenUrl required")
+				}
+				securityScheme := spec.OAuth2Password(attrMap["@tokenurl"])
+				for scope, description := range scopes {
+					securityScheme.AddScope(scope, description)
+				}
+				securityMap[strings.TrimSpace(comments[i][len(attribute):])] = securityScheme
+			case "@securitydefinitions.oauth2.accesscode":
+				attrMap := map[string]string{}
+				scopes := map[string]string{}
+				for _, v := range comments[i+1:] {
+					securityAttr := strings.ToLower(strings.Split(v, " ")[0])
+					if securityAttr == "@tokenurl" || securityAttr == "@authorizationurl" {
+						attrMap[securityAttr] = strings.TrimSpace(v[len(securityAttr):])
+					} else if isExistsScope(securityAttr) {
+						scopes[getScopeScheme(securityAttr)] = v[len(securityAttr):]
+					}
+					// next securityDefinitions
+					if strings.Index(securityAttr, "@securitydefinitions.") == 0 {
+						break
+					}
+				}
+				if len(attrMap) != 2 {
+					log.Panic("@securitydefinitions.oauth2.accessCode is @tokenUrl and @authorizationUrl required")
+				}
+				securityScheme := spec.OAuth2AccessToken(attrMap["@authorizationurl"], attrMap["@tokenurl"])
+				for scope, description := range scopes {
+					securityScheme.AddScope(scope, description)
+				}
+				securityMap[strings.TrimSpace(comments[i][len(attribute):])] = securityScheme
+			}
+		}
+	}
+
+	if len(securityMap) > 0 {
+		parser.swagger.SecurityDefinitions = securityMap
+	}
 }
 
 // ParseGeneralAPIInfo parses general api info for gived mainAPIFile path
@@ -89,6 +255,8 @@ func (parser *Parser) ParseGeneralAPIInfo(mainAPIFile string) {
 	if fileTree.Comments != nil {
 		for _, comment := range fileTree.Comments {
 			comments := strings.Split(comment.Text(), "\n")
+
+			// ⬇︎この段階でlineごとのstringになっている。
 			for _, commentLine := range comments {
 				attribute := strings.ToLower(strings.Split(commentLine, " ")[0])
 				switch attribute {
@@ -276,6 +444,7 @@ func (parser *Parser) ParseRouterAPIInfo(astFile *ast.File) {
 				operation := NewOperation() //for per 'function' comment, create a new 'Operation' object
 				operation.parser = parser
 				for _, comment := range astDeclaration.Doc.List {
+					// ここで comment.Textで1行までパースされている
 					if err := operation.ParseComment(comment.Text); err != nil {
 						log.Panicf("ParseComment panic:%+v", err)
 					}
