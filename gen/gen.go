@@ -69,7 +69,7 @@ import (
 	"github.com/swaggo/swag"
 )
 
-var doc = {{.Doc}}
+var Doc = {{.Doc}}
 
 
 type s struct{}
